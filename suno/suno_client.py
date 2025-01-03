@@ -113,7 +113,9 @@ class Client:
         self._sid = None
 
     def request(self, *args, **kwargs) -> requests.Response:
-        kwargs["impersonate"] = kwargs.get("impersonate", "chrome")
+        # Removemos la opción impersonate para que funcione con la API
+        if 'impersonate' in kwargs:
+            del kwargs['impersonate']
         return self._session.request(*args, **kwargs)
 
     def sleep(self, seconds: Optional[float] = None) -> None:
@@ -246,7 +248,7 @@ class Songs(APIResource):
         negative_tags: Optional[str] = "",
         instrumental: bool = False,
         title: Optional[str] = None,
-        model: str = "chirp-v3-5-tau",
+        model: str = "chirp-v3-5",
     ) -> List[Song]:
         url = URL_GENERATE
         payload = {

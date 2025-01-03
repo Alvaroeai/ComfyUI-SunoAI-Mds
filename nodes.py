@@ -1,10 +1,15 @@
+import requests
+# The above Python code is attempting to import the `suno_client` module from the `suno` package using
+# a relative import. The `from .suno.suno_client import *` statement is trying to import all objects
+# (functions, classes, variables) from the `suno_client` module within the `suno` package.
+from .suno.suno_client import *
+import json
 import os
-import datetime
 import folder_paths
-import time
 
 from .suno.suno_client import *
 
+# Los nodos originales se mantienen sin cambios
 class SunoAIGenerator:
     def __init__(self):
         self.output_dir = os.path.join(folder_paths.get_output_directory(), 'output/suno_ai_songs')
@@ -211,13 +216,137 @@ class SunoAudioManager:
             # Return a tuple of None values matching your RETURN_TYPES
             return (None, None, None, None, None, None)
 
-# Node class mappings
+# Nuevos nodos para API proxy
+class SunoProxyNode:
+    """Nodo para generar música usando la API proxy de Suno"""
+    
+    def __init__(self):
+        pass
+        
+    @classmethod
+    def INPUT_TYPES(cls):
+        return {
+            "required": {
+                "prompt": ("STRING", {"default": "Enter your song idea here", "multiline": True}),
+                "cookie": ("STRING", {"multiline": True, "default": ""}),
+                "api_url": ("STRING", {"default": "http://localhost:8000"}),
+                "model": ("STRING", {"default": "chirp-v3-5"}),
+                "custom": ("BOOLEAN", {"default": False}),
+            },
+            "optional": {
+                "tags": ("STRING", {"default": ""}),
+                "negative_tags": ("STRING", {"default": ""}),
+                "title": ("STRING", {"default": ""}),
+                "instrumental": ("BOOLEAN", {"default": False}),
+            }
+        }
+
+    RETURN_TYPES = ("STRING", "STRING", "JSON")
+    RETURN_NAMES = ("clip_id_01", "clip_id_02", "response")
+    FUNCTION = "generate_music"
+    CATEGORY = "Mideas_SunoAI"
+
+    def generate_music(self, prompt, cookie, api_url="http://localhost:8000", model="chirp-v3-5", 
+                      custom=False, tags="", negative_tags="", title="", instrumental=False):
+        try:
+            # Preparar los datos para la solicitud
+            data = {
+                "prompt": prompt,
+                "cookie": cookie,
+                "model": model,
+                "custom": custom,
+                "instrumental": instrumental,
+                "tags": tags,
+                "negative_tags": negative_tags,
+                "title": title if custom else ""
+            }
+
+            # Hacer la solicitud al endpoint de generación
+            response = requests.post(
+                f"{api_url}/generate",
+                json=data,
+                headers={"Content-Type": "application/json"},
+                timeout=300
+            )
+            
+            # Verificar si la solicitud fue exitosa
+            response.raise_for_status()
+            
+            # Obtener las canciones generadas
+            songs = response.json()
+            
+            # Validar que se hayan generado canciones
+            if not songs or len(songs) < 2:
+                raise ValueError("Not enough songs generated")
+            
+            # Obtener los IDs de los clips generados
+            clip_ids = [song["id"] for song in songs[:2]]
+
+            # Convertir la respuesta completa a una cadena JSON
+            full_json_response = json.dumps(songs, indent=4)
+
+            # Retornar los IDs de los dos primeros clips y la respuesta completa
+            return (clip_ids[0], clip_ids[1], full_json_response)
+        
+        except Exception as e:
+            print(f"Error generating music: {str(e)}")
+            if hasattr(e, 'response'):
+                print(f"Response status: {e.response.status_code}")
+                print(f"Response content: {e.response.text}")
+            return ("", "", "{}")
+
+class SunoProxyDownloadNode:
+    """Nodo para descargar archivos usando la API proxy de Suno"""
+    
+    def __init__(self):
+        pass
+
+    @classmethod
+    def INPUT_TYPES(cls):
+        return {
+            "required": {
+                "song_id": ("STRING", {"default": ""}),
+                "cookie": ("STRING", {"default": ""}),
+                "api_url": ("STRING", {"default": "http://localhost:8080"}),
+                "file_type": (["audio", "video", "image"], {"default": "audio"}),
+            }
+        }
+
+    RETURN_TYPES = ("STRING",)
+    RETURN_NAMES = ("FILE_URL",)
+    FUNCTION = "download_file"
+    CATEGORY = "Suno"
+
+    def download_file(self, song_id, cookie, api_url="http://localhost:8000", file_type="audio"):
+        try:
+            response = requests.get(
+                f"{api_url}/download/{song_id}",
+                params={
+                    "cookie": cookie,
+                    "file_type": file_type
+                },
+                timeout=60
+            )
+            
+            response.raise_for_status()
+            result = response.json()
+            return (result.get("url", ""),)
+
+        except Exception as e:
+            print(f"Error downloading file: {str(e)}")
+            return ("",)
+
+# Registrar todos los nodos
 NODE_CLASS_MAPPINGS = {
     "Mideas_SunoAI_Generator": SunoAIGenerator,
-    "Mideas_SunoAI_AudioManager": SunoAudioManager
+    "Mideas_SunoAI_AudioManager": SunoAudioManager,
+    "Mideas_SunoAI_ProxyNode": SunoProxyNode,
+    "Mideas_SunoAI_ProxyDownloadNode": SunoProxyDownloadNode
 }
 
 NODE_DISPLAY_NAME_MAPPINGS = {
-    "Mideas_SunoAI_Generator": "SunoAI Generator",
-    "Mideas_SunoAI_AudioManager": "SunoAI Audio Manager"
+    "Mideas_SunoAI_Generator": "Suno Generate",
+    "Mideas_SunoAI_AudioManager": "Suno Download",
+    "Mideas_SunoAI_ProxyNode": "Suno Proxy Generate",
+    "Mideas_SunoAI_ProxyDownloadNode": "Suno Proxy Download"
 }

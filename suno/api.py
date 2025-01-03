@@ -51,6 +51,7 @@ async def generate_song(request: GenerateRequest):
         )
         return songs
     except Exception as e:
+        print(f"Error generating music: {str(e)}")
         raise HTTPException(status_code=500, detail=str(e))
 
 @app.get("/song/{song_id}")
@@ -60,6 +61,7 @@ async def get_song(song_id: str, cookie: str):
         song = client.get_song(song_id)
         return song
     except Exception as e:
+        print(f"Error getting song: {str(e)}")
         raise HTTPException(status_code=500, detail=str(e))
 
 @app.get("/songs")
@@ -69,6 +71,7 @@ async def get_songs(cookie: str):
         songs = client.get_songs()
         return songs
     except Exception as e:
+        print(f"Error getting songs: {str(e)}")
         raise HTTPException(status_code=500, detail=str(e))
 
 @app.get("/download/{song_id}")
@@ -95,4 +98,5 @@ async def download_song(
             raise HTTPException(status_code=400, detail="Invalid file type")
             
     except Exception as e:
+        print(f"Error downloading file: {str(e)}")
         raise HTTPException(status_code=500, detail=str(e)) 
