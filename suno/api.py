@@ -1,8 +1,15 @@
-from fastapi import FastAPI, HTTPException
+from fastapi import FastAPI, HTTPException, Depends, Query, Path
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import JSONResponse
 from pydantic import BaseModel
-from typing import Optional, List
+from typing import Optional, List, Dict, Any
 from .suno_client import Suno, SongGenerateParams, Song
+import logging
+from functools import lru_cache
+
+# Configure logging
+logging.basicConfig(level=logging.INFO)
+logger = logging.getLogger(__name__)
 
 app = FastAPI(
     title="Suno API Proxy",
@@ -12,7 +19,7 @@ app = FastAPI(
     redoc_url="/redoc"
 )
 
-# Configurar CORS
+# Configure CORS
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"],
@@ -21,11 +28,18 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-@app.get("/")
-async def root():
-    return {"message": "Suno API is running", "docs": "/docs", "redoc": "/redoc"}
-
-# Modelo para la solicitud de generación
+# Response Models
+class ErrorResponse(BaseModel):
+    detail: str
+    status_code: int
+    
+class SongResponse(BaseModel):
+    id: str
+    status: str
+    audio_url: Optional[str] = None
+    video_url: Optional[str] = None
+    cover_image_url: Optional[str] = None
+    
 class GenerateRequest(BaseModel):
     prompt: str
     custom: bool = False
@@ -36,10 +50,28 @@ class GenerateRequest(BaseModel):
     model: str = "chirp-v3-5-tau"
     cookie: str
 
-@app.post("/generate", response_model=List[Song])
+# Client management
+@lru_cache()
+def get_suno_client(cookie: str) -> Suno:
+    return Suno(cookie=cookie)
+
+# Exception handler
+@app.exception_handler(Exception)
+async def global_exception_handler(request, exc):
+    logger.error(f"Global error: {str(exc)}", exc_info=True)
+    return JSONResponse(
+        status_code=500,
+        content={"detail": "An internal error occurred", "status_code": 500}
+    )
+
+@app.get("/")
+async def root():
+    return {"message": "Suno API is running", "docs": "/docs", "redoc": "/redoc"}
+
+@app.post("/generate", response_model=List[SongResponse])
 async def generate_song(request: GenerateRequest):
     try:
-        client = Suno(cookie=request.cookie)
+        client = get_suno_client(request.cookie)
         songs = client.songs.generate(
             prompt=request.prompt,
             custom=request.custom,
@@ -49,54 +81,86 @@ async def generate_song(request: GenerateRequest):
             title=request.title,
             model=request.model
         )
-        return songs
+        return [SongResponse(**song.dict()) for song in songs]
     except Exception as e:
-        print(f"Error generating music: {str(e)}")
-        raise HTTPException(status_code=500, detail=str(e))
+        logger.error(f"Error generating music: {str(e)}", exc_info=True)
+        raise HTTPException(
+            status_code=500,
+            detail={"message": "Failed to generate song", "error": str(e)}
+        )
 
-@app.get("/song/{song_id}")
-async def get_song(song_id: str, cookie: str):
+@app.get("/song/{song_id}", response_model=SongResponse)
+async def get_song(
+    song_id: str = Path(..., description="The ID of the song to retrieve"),
+    cookie: str = Query(..., description="Authentication cookie")
+):
     try:
-        client = Suno(cookie=cookie)
+        client = get_suno_client(cookie)
         song = client.get_song(song_id)
-        return song
+        return SongResponse(**song.dict())
     except Exception as e:
-        print(f"Error getting song: {str(e)}")
-        raise HTTPException(status_code=500, detail=str(e))
+        logger.error(f"Error getting song {song_id}: {str(e)}", exc_info=True)
+        raise HTTPException(
+            status_code=404 if "not found" in str(e).lower() else 500,
+            detail={"message": f"Failed to get song {song_id}", "error": str(e)}
+        )
 
-@app.get("/songs")
-async def get_songs(cookie: str):
+@app.get("/songs", response_model=List[SongResponse])
+async def get_songs(
+    cookie: str = Query(..., description="Authentication cookie")
+):
     try:
-        client = Suno(cookie=cookie)
+        client = get_suno_client(cookie)
         songs = client.get_songs()
-        return songs
+        return [SongResponse(**song.dict()) for song in songs]
     except Exception as e:
-        print(f"Error getting songs: {str(e)}")
-        raise HTTPException(status_code=500, detail=str(e))
+        logger.error(f"Error getting songs: {str(e)}", exc_info=True)
+        raise HTTPException(
+            status_code=500,
+            detail={"message": "Failed to get songs", "error": str(e)}
+        )
 
 @app.get("/download/{song_id}")
 async def download_song(
-    song_id: str,
-    cookie: str,
-    file_type: str = "audio"
+    song_id: str = Path(..., description="The ID of the song to download"),
+    cookie: str = Query(..., description="Authentication cookie"),
+    file_type: str = Query("audio", description="Type of file to download: audio, video, or image")
 ):
     try:
-        client = Suno(cookie=cookie)
-        song = client.get_song(song_id)
+        client = get_suno_client(cookie)
         
-        # Esperar a que el archivo esté listo
+        # First get the song to verify it exists
+        song = client.get_song(song_id)
+        if not song:
+            raise HTTPException(status_code=404, detail=f"Song {song_id} not found")
+            
+        # Wait for the file to be ready
         song = client.songs.wait_for_file(song_id, file_type)
         
-        # Retornar la URL del archivo según el tipo
-        if file_type == "audio":
-            return {"url": song.audio_url}
-        elif file_type == "video":
-            return {"url": song.video_url}
-        elif file_type == "image":
-            return {"url": song.cover_image_url}
-        else:
+        # Return the appropriate URL based on file type
+        urls = {
+            "audio": song.audio_url,
+            "video": song.video_url,
+            "image": song.cover_image_url
+        }
+        
+        if file_type not in urls:
             raise HTTPException(status_code=400, detail="Invalid file type")
             
+        url = urls[file_type]
+        if not url:
+            raise HTTPException(
+                status_code=404,
+                detail=f"{file_type} file not available for song {song_id}"
+            )
+            
+        return {"url": url}
+            
+    except HTTPException as he:
+        raise he
     except Exception as e:
-        print(f"Error downloading file: {str(e)}")
-        raise HTTPException(status_code=500, detail=str(e)) 
+        logger.error(f"Error downloading {file_type} for song {song_id}: {str(e)}", exc_info=True)
+        raise HTTPException(
+            status_code=500,
+            detail={"message": f"Failed to download {file_type}", "error": str(e)}
+        )
