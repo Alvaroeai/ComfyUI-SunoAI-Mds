@@ -9,6 +9,10 @@ from curl_cffi import requests
 from curl_cffi.requests import Response
 from pydantic import BaseModel, ConfigDict
 
+import asyncio
+#from pyppeteer import launch
+from typing import Optional
+
 # ===================== CONFIGURACIÓN ===================== #
 COOKIE = os.getenv("SUNO_COOKIE", "")
 CLIENT_JS_VERSION = "5.43.6"
@@ -26,6 +30,27 @@ URL_GENERATE = f"{BASE_URL}/generate/v2/"
 URL_SESSION = f"{BASE_URL}/session"
 URL_CREDITS = f"{BASE_URL}/billing/info"
 URL_EXTEND = f"{BASE_URL}/user/extend_session_id/"
+URL_VERIFY = f"{CLERK_URL}/client/verify?__clerk_api_version={CLERK_API_VERSION}&_clerk_js_version={CLIENT_JS_VERSION}"
+
+
+# Available models with their descriptions
+AVAILABLE_MODELS = {
+    "chirp-v4": "Last generation model",
+    "chirp-v3-5": "Default high-quality model",
+    "chirp-v3-0": "Previous generation model",
+    "chirp-v2-5": "Earlier generation model",
+    # Add more models as they become available
+}
+
+class SunoConfig:
+    # Available models with their descriptions
+    AVAILABLE_MODELS = {
+        "chirp-v4": "Last generation model",
+        "chirp-v3-5": "Default high-quality model",
+        "chirp-v3-0": "Previous generation model",
+        "chirp-v2-5": "Earlier generation model",
+        # Add more models as they become available
+    }
 
 # ===================== MODELOS ===================== #
 class Song(BaseModel):
@@ -58,6 +83,7 @@ class SongGenerateParams(BaseModel):
     custom: bool = False
     tags: str = ""
     instrumental: bool = False
+
 
 # ===================== CLIENTE BASE CON CLOUDFLARE BYPASS ===================== #
 class CloudflareBypassClient:
@@ -151,6 +177,95 @@ class CloudflareBypassClient:
             return True
         return False
 
+    async def _solve_hcaptcha(self) -> Optional[str]:
+        """Resuelve el hCaptcha usando Puppeteer."""
+        try:
+            token = await self.hcaptcha_solver.solve_hcaptcha(
+                site_key="a8befae5-34a6-44ad-a09b-5c7fcc0c6e5d",
+                url="https://suno.com"
+            )
+            return token
+        except Exception as e:
+            print(f"Error resolviendo hCaptcha: {e}")
+            return None
+            
+    # Añadir estos métodos en la clase CloudflareBypassClient
+
+    def _verify_hcaptcha(self, token: str) -> bool:
+        """Verifica el token de hCaptcha con la API de Suno."""
+        try:
+            response = self.request(
+                "POST", 
+                HCAPTCHA_VERIFY_URL,
+                json={
+                    "token": token,
+                    "session_id": self._sid,
+                    "type": "hcaptcha"
+                }
+            )
+            
+            if response.status_code == 200:
+                print("Token de hCaptcha verificado correctamente")
+                return True
+            else:
+                print(f"Error al verificar hCaptcha: {response.status_code}")
+                return False
+                
+        except Exception as e:
+            print(f"Error durante la verificación de hCaptcha: {e}")
+            return False
+
+    def _verify_captcha(self, captcha_token: str) -> bool:
+        """Verifica el token de captcha con la API de Clerk."""
+        try:
+            payload = {
+                'captcha_token': captcha_token,
+                'captcha_widget_type': 'invisible'
+            }
+            
+            headers = {
+                **self.headers,
+                'content-type': 'application/x-www-form-urlencoded',
+                'origin': 'https://suno.com',
+                'referer': 'https://suno.com/'
+            }
+            
+            response = self._session.request(
+                "POST",
+                URL_VERIFY,
+                data=payload,
+                headers=headers
+            )
+            
+            if response.status_code == 200:
+                print("Token de captcha verificado correctamente")
+                return True
+            else:
+                print(f"Error al verificar captcha: {response.status_code}")
+                return False
+                
+        except Exception as e:
+            print(f"Error durante la verificación de captcha: {e}")
+            return False
+
+    def _get_or_create_eventloop(self):
+        """Obtiene el event loop actual o crea uno nuevo si es necesario."""
+        try:
+            return asyncio.get_event_loop()
+        except RuntimeError:
+            loop = asyncio.new_event_loop()
+            asyncio.set_event_loop(loop)
+            return loop
+
+    def _run_async(self, coro):
+        """Ejecuta una corutina de manera segura."""
+        loop = self._get_or_create_eventloop()
+        if loop.is_running():
+            # Si el loop está corriendo, creamos uno nuevo en un thread separado
+            return asyncio.run_coroutine_threadsafe(coro, loop).result()
+        else:
+            return loop.run_until_complete(coro)
+
     def request(self, method: str, url: str, **kwargs: Any) -> Response:
         retries = 0
         while retries < self._max_retries:
@@ -162,10 +277,13 @@ class CloudflareBypassClient:
                     return response
                 elif response.status_code == 401:
                     print(f"Error de autenticación (401). Reintentando... ({retries + 1}/{self._max_retries})")
-                    self._renew()  # Intentamos renovar el token
+                    self._renew()
                 elif response.status_code == 422:
-                    print("Error 422: Intentando extender la sesión...")
-                    self._extend_session()  # Intentamos extender la sesión
+                    print("Error 422: Captcha requerido")
+                    # Aquí podrías implementar la obtención del token de captcha
+                    # Por ahora, solo manejamos el error
+                    print("No se puede resolver el captcha automáticamente")
+                    raise Exception("Se requiere captcha")
                 elif self._handle_cloudflare(response):
                     print(f"Reintentando después del desafío Cloudflare... ({retries + 1}/{self._max_retries})")
                 else:
@@ -182,6 +300,19 @@ class CloudflareBypassClient:
                 time.sleep(sleep_time)
         
         raise Exception(f"No se pudo completar la solicitud después de {self._max_retries} intentos")
+
+    def __del__(self):
+        """Cleanup cuando se destruye el objeto."""
+        try:
+            if hasattr(self, 'hcaptcha_solver'):
+                self._run_async(self._cleanup())
+        except Exception as e:
+            print(f"Error durante la limpieza: {e}")
+
+    async def _cleanup(self):
+        """Limpia los recursos de manera asíncrona."""
+        if hasattr(self, 'hcaptcha_solver'):
+            await self.hcaptcha_solver.close()
 
     def _refresh_session(self) -> None:
         try:
@@ -282,6 +413,39 @@ class Songs(APIResource):
         response = self.request("POST", url, json=payload)
         response.raise_for_status()
         return [Song(**clip) for clip in response.json().get("clips", [])]
+
+    def wait_for_file(self, song_id: str, file_type: str = "audio", max_attempts: int = 30, delay: int = 2) -> Song:
+        """
+        Espera hasta que el archivo (audio o video) de una canción esté disponible.
+        
+        Args:
+            song_id: ID de la canción
+            file_type: Tipo de archivo ('audio' o 'video')
+            max_attempts: Número máximo de intentos
+            delay: Tiempo de espera entre intentos en segundos
+            
+        Returns:
+            Song: Objeto Song con el archivo disponible
+            
+        Raises:
+            Exception: Si el archivo no está disponible después de max_attempts
+        """
+        attempts = 0
+        while attempts < max_attempts:
+            song = self._client.get_song(song_id)
+            
+            if file_type == "audio" and song.audio_url:
+                return song
+            elif file_type == "video" and song.video_url:
+                return song
+            elif file_type == "image" and song.cover_image_url:
+                return song
+                
+            print(f"Archivo {file_type} no disponible aún. Intento {attempts + 1}/{max_attempts} {song}")
+            time.sleep(delay)
+            attempts += 1
+            
+        raise Exception(f"Tiempo de espera agotado esperando el archivo {file_type} para la canción {song_id}")
 
 # ===================== FUNCIONES AUXILIARES ===================== #
 def _get_id(song: Union[str, Song]) -> str:

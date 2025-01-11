@@ -296,10 +296,12 @@ class SunoProxyNode:
             return ("", "", "{}")
 
 class SunoProxyDownloadNode:
-    """Nodo para descargar archivos usando la API proxy de Suno"""
+    """Node for downloading files using the Suno API proxy with local file storage"""
     
     def __init__(self):
-        pass
+        self.output_dir = os.path.join(folder_paths.get_output_directory(), 'suno_audio_files')
+        if not os.path.exists(self.output_dir):
+            os.makedirs(self.output_dir)
 
     @classmethod
     def INPUT_TYPES(cls):
@@ -309,16 +311,18 @@ class SunoProxyDownloadNode:
                 "cookie": ("STRING", {"default": ""}),
                 "api_url": ("STRING", {"default": "http://localhost:8080"}),
                 "file_type": (["audio", "video", "image"], {"default": "audio"}),
+                "download_file": ("BOOLEAN", {"default": True}),
             }
         }
 
-    RETURN_TYPES = ("STRING",)
-    RETURN_NAMES = ("FILE_URL",)
+    RETURN_TYPES = ("STRING", "STRING")  # URL, local file path
+    RETURN_NAMES = ("FILE_URL", "FILE_PATH")
     FUNCTION = "download_file"
     CATEGORY = "Suno"
 
-    def download_file(self, song_id, cookie, api_url="http://localhost:8000", file_type="audio"):
+    def download_file(self, song_id, cookie, api_url="http://localhost:8000", file_type="audio", download_file=True):
         try:
+            # Get the file URL from the API
             response = requests.get(
                 f"{api_url}/download/{song_id}",
                 params={
@@ -330,11 +334,45 @@ class SunoProxyDownloadNode:
             
             response.raise_for_status()
             result = response.json()
-            return (result.get("url", ""),)
+            file_url = result.get("url", "")
+            local_path = ""
+
+            # Download the file if requested and URL is available
+            if download_file and file_url:
+                try:
+                    # Determine file extension based on file_type
+                    extension = {
+                        "audio": "mp3",
+                        "video": "mp4",
+                        "image": "jpeg"
+                    }.get(file_type, "mp3")
+
+                    # Create local file path
+                    local_path = os.path.join(self.output_dir, f"{song_id}.{extension}")
+
+                    # Download the file
+                    print(f"Downloading {file_type} {file_url} to {local_path}...")
+                    file_response = requests.get(file_url, timeout=300)
+                    file_response.raise_for_status()
+
+                    # Save the file
+                    with open(local_path, 'wb') as f:
+                        f.write(file_response.content)
+
+                    print(f"Successfully downloaded {file_type} to: {local_path}")
+
+                except Exception as e:
+                    print(f"Error downloading file: {str(e)}")
+                    local_path = ""
+
+            return (file_url, local_path)
 
         except Exception as e:
-            print(f"Error downloading file: {str(e)}")
-            return ("",)
+            print(f"Error in download_file: {str(e)}")
+            if hasattr(e, 'response'):
+                print(f"Response status: {e.response.status_code}")
+                print(f"Response content: {e.response.text}")
+            return ("", "")
 
 # Registrar todos los nodos
 NODE_CLASS_MAPPINGS = {
